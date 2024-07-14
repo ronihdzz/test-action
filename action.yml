@@ -1,0 +1,47 @@
+name: 'Build and Test'
+description: 'Builds the Docker image and runs tests'
+inputs:
+  gh-token:
+    description: 'GitHub Token'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    - name: Cache Docker layers
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+    - name: Build and run tests
+      shell: bash
+      run: |
+        docker build -f deployments/tests/Dockerfile.test -t tests-project .
+        docker run --rm \
+          -v ${{ github.workspace }}/deployments/tests/reports:/application/src/reports \
+          tests-project
+    - name: Save artifacts to artifacts branch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        COMMIT_ID: ${{ github.sha }}
+        BRANCH_NAME: ${{ github.ref_name }}
+        REPO_NAME: ${{ github.repository }}
+      run: |
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+        git clone https://${GH_TOKEN}@github.com/${REPO_NAME}.git artifacts-repo
+        cd artifacts-repo
+        git checkout artifacts || git checkout --orphan artifacts
+        mkdir -p ${BRANCH_NAME}/${COMMIT_ID}
+        cp ../deployments/tests/reports/* ${BRANCH_NAME}/${COMMIT_ID}/
+        mkdir -p ${BRANCH_NAME}/latest
+        cp ../deployments/tests/reports/* ${BRANCH_NAME}/latest/
+        git add .
+        git commit -m "Add artifacts for commit $COMMIT_ID on branch $BRANCH_NAME"
+        git push https://${GH_TOKEN}@github.com/${REPO_NAME}.git artifacts
