@@ -1,16 +1,26 @@
-name: 'Build and Test'
-description: 'Builds the Docker image and runs tests'
+name: 'Test with Artifacts'
+description: 'Builds the Docker image and runs tests, then saves artifacts'
 inputs:
   gh-token:
     description: 'GitHub Token'
     required: true
+  artifacts-branch:
+    description: 'Name of the branch to save artifacts'
+    required: false
+    default: 'artifacts'
+  dockerfile-path:
+    description: 'Path to the Dockerfile for testing'
+    required: true
+    default: 'deployments/tests/Dockerfile.test'
 runs:
   using: 'composite'
   steps:
     - name: Checkout code
       uses: actions/checkout@v3
+
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
+
     - name: Cache Docker layers
       uses: actions/cache@v3
       with:
@@ -18,30 +28,68 @@ runs:
         key: ${{ runner.os }}-buildx-${{ github.sha }}
         restore-keys: |
           ${{ runner.os }}-buildx-
+
     - name: Build and run tests
       shell: bash
+      env:
+        DOCKERFILE_PATH: ${{ inputs.dockerfile-path }}
       run: |
-        docker build -f deployments/tests/Dockerfile.test -t tests-project .
+        echo "Building Docker image using Dockerfile at $DOCKERFILE_PATH"
+        docker build -f $DOCKERFILE_PATH -t tests-project .
+        echo "Running tests in Docker container"
         docker run --rm \
           -v ${{ github.workspace }}/deployments/tests/reports:/application/src/reports \
           tests-project
-    - name: Save artifacts to artifacts branch
+        echo "Tests completed. Reports are available in deployments/tests/reports"
+
+    - name: Save artifacts to branch
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh-token }}
         COMMIT_ID: ${{ github.sha }}
         BRANCH_NAME: ${{ github.ref_name }}
         REPO_NAME: ${{ github.repository }}
+        ARTIFACTS_BRANCH: ${{ inputs.artifacts-branch }}
       run: |
+        echo "Configuring git user"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
         git config --global user.name "github-actions[bot]"
-        git clone https://${GH_TOKEN}@github.com/${REPO_NAME}.git artifacts-repo
-        cd artifacts-repo
-        git checkout artifacts || git checkout --orphan artifacts
+
+        echo "Checking if artifacts branch exists"
+        BRANCH_EXISTS=$(git ls-remote --heads https://${GH_TOKEN}@github.com/${REPO_NAME}.git ${ARTIFACTS_BRANCH})
+        if [ -n "$BRANCH_EXISTS" ]; then
+          echo "Branch ${ARTIFACTS_BRANCH} exists. Cloning the branch"
+          git clone --branch ${ARTIFACTS_BRANCH} --single-branch https://${GH_TOKEN}@github.com/${REPO_NAME}.git artifacts-repo
+          cd artifacts-repo
+        else
+          echo "Branch ${ARTIFACTS_BRANCH} does not exist. Creating new orphan branch"
+          mkdir artifacts-repo
+          cd artifacts-repo
+          git init
+          git checkout --orphan ${ARTIFACTS_BRANCH}
+          git commit --allow-empty -m "Initial commit for ${ARTIFACTS_BRANCH} branch"
+          git remote add origin https://${GH_TOKEN}@github.com/${REPO_NAME}.git
+          git push --set-upstream origin ${ARTIFACTS_BRANCH}
+        fi
+
+        echo "Creating directories for artifacts"
         mkdir -p ${BRANCH_NAME}/${COMMIT_ID}
         cp ../deployments/tests/reports/* ${BRANCH_NAME}/${COMMIT_ID}/
         mkdir -p ${BRANCH_NAME}/latest
         cp ../deployments/tests/reports/* ${BRANCH_NAME}/latest/
-        git add .
-        git commit -m "Add artifacts for commit $COMMIT_ID on branch $BRANCH_NAME"
-        git push https://${GH_TOKEN}@github.com/${REPO_NAME}.git artifacts
+
+        echo "Adding README to artifacts repository"
+        README_CONTENT="# Artifacts Repository\n\nThis repository contains test reports and other artifacts for the project."
+        echo -e $README_CONTENT > README.md
+
+        echo "Adding artifacts and README to git"
+        git add README.md
+        git add ${BRANCH_NAME}/${COMMIT_ID}/*
+        git add ${BRANCH_NAME}/latest/*
+
+        git commit -m "Add artifacts and README for commit $COMMIT_ID on branch $BRANCH_NAME"
+        
+        echo "Pushing artifacts to ${ARTIFACTS_BRANCH} branch"
+        git push origin ${ARTIFACTS_BRANCH}
+        
+        echo "Artifacts have been successfully pushed to ${ARTIFACTS_BRANCH} branch"
